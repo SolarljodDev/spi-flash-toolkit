@@ -13,7 +13,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/build_config.cmake")
     include("${CMAKE_SOURCE_DIR}/cmake/build_config.cmake")
 endif()
 
-project(eeprom-reader C ASM)
+project(spi-flash-toolkit C ASM)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -83,12 +83,12 @@ endif()
 
 set(SOURCES ${USER_SOURCES} ${MCU_STARTUP} ${MCU_SYSTEM})
 
-add_executable(eeprom-reader.elf ${SOURCES})
+add_executable(spi-flash-toolkit.elf ${SOURCES})
 
-add_custom_command(TARGET eeprom-reader.elf POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:eeprom-reader.elf>
-            ${CMAKE_BINARY_DIR}/eeprom-reader.hex
-    COMMENT "HEX: eeprom-reader.hex" VERBATIM)
-add_custom_command(TARGET eeprom-reader.elf POST_BUILD
-    COMMAND ${CMAKE_SIZE_UTIL} $<TARGET_FILE:eeprom-reader.elf>
+add_custom_command(TARGET spi-flash-toolkit.elf POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:spi-flash-toolkit.elf>
+            ${CMAKE_BINARY_DIR}/spi-flash-toolkit.hex
+    COMMENT "HEX: spi-flash-toolkit.hex" VERBATIM)
+add_custom_command(TARGET spi-flash-toolkit.elf POST_BUILD
+    COMMAND ${CMAKE_SIZE_UTIL} $<TARGET_FILE:spi-flash-toolkit.elf>
     COMMENT "Firmware size:" VERBATIM)

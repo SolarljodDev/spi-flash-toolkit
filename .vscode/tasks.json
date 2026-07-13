@@ -31,7 +31,7 @@
                 "-s", "C:/tools-mcu/openocd/openocd/scripts",
                 "-f", "interface/stlink.cfg",
                 "-f", "target/stm32f1x.cfg",
-                "-c", "program {${workspaceFolder}/build/cmake/eeprom-reader.elf} verify reset exit"
+                "-c", "program {${workspaceFolder}/build/cmake/spi-flash-toolkit.elf} verify reset exit"
             ],
             "group": "build",
             "problemMatcher": []
@@ -44,7 +44,7 @@
                 "-s", "C:/tools-mcu/openocd/openocd/scripts",
                 "-f", "interface/cmsis-dap.cfg",
                 "-f", "target/stm32f1x.cfg",
-                "-c", "program {${workspaceFolder}/build/cmake/eeprom-reader.elf} verify reset exit"
+                "-c", "program {${workspaceFolder}/build/cmake/spi-flash-toolkit.elf} verify reset exit"
             ],
             "group": "build",
             "problemMatcher": []
