@@ -1,0 +1,53 @@
+﻿{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cmake build",
+            "type": "shell",
+            "command": "powershell",
+            "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build.ps1"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": {
+                "owner": "gcc",
+                "fileLocation": ["absolute"],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+                }
+            }
+        },
+        {
+            "label": "cmake clean build",
+            "type": "shell",
+            "command": "powershell",
+            "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build.ps1", "-Clean"],
+            "group": "build",
+            "problemMatcher": []
+        }        ,{
+            "label": "flash (ST-Link)",
+            "type": "shell",
+            "command": "C:/tools-mcu/openocd/bin/openocd.exe",
+            "args": [
+                "-s", "C:/tools-mcu/openocd/openocd/scripts",
+                "-f", "interface/stlink.cfg",
+                "-f", "target/stm32f1x.cfg",
+                "-c", "program {${workspaceFolder}/build/cmake/eeprom-reader.elf} verify reset exit"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "flash (CMSIS-DAP)",
+            "type": "shell",
+            "command": "C:/tools-mcu/openocd/bin/openocd.exe",
+            "args": [
+                "-s", "C:/tools-mcu/openocd/openocd/scripts",
+                "-f", "interface/cmsis-dap.cfg",
+                "-f", "target/stm32f1x.cfg",
+                "-c", "program {${workspaceFolder}/build/cmake/eeprom-reader.elf} verify reset exit"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        }
+    ]
+}

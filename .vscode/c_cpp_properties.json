@@ -1,0 +1,10 @@
+{
+    "configurations": [
+        {
+            "name": "STM32F103xB",
+            "compileCommands": "${workspaceFolder}/build/cmake/compile_commands.json",
+            "intelliSenseMode": "gcc-arm"
+        }
+    ],
+    "version": 4
+}

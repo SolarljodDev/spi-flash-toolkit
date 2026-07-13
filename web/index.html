@@ -1,0 +1,1991 @@
+<title>SPI EEPROM/Flash Reader</title>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --panel: #ffffff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --border: #d8d8dc;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --ok: #16803c;
+    --err: #c0392b;
+    --mono-bg: #0f1117;
+    --mono-text: #d7dbe0;
+    --mono-addr: #7a8a9a;
+    --mono-ascii: #8fb3ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181c;
+      --panel: #212227;
+      --text: #e7e7ea;
+      --muted: #9a9aa2;
+      --border: #35363c;
+      --mono-bg: #0b0c0f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .row:last-child { margin-bottom: 0; }
+  label { font-size: 0.82rem; color: var(--muted); }
+  input[type=number], input[type=text], select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 8px;
+    font-size: 0.85rem;
+    width: 110px;
+  }
+  select { width: auto; }
+  button {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  #status { font-size: 0.85rem; }
+  #status .ok { color: var(--ok); }
+  #status .err { color: var(--err); }
+  .progress-wrap {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border);
+    overflow: hidden;
+    flex: 1 1 220px;
+    min-width: 160px;
+  }
+  .progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.1s linear; }
+  #hexview {
+    background: var(--mono-bg);
+    color: var(--mono-text);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    max-height: 60vh;
+    overflow: auto;
+    white-space: pre;
+    /* Defense in depth for "Show Full Dump"/full diff views (hundreds of
+       thousands of lines): contain tells the browser this element's layout/
+       paint can't affect the rest of the page (and vice versa), and
+       content-visibility skips layout/paint work for the offscreen part of
+       its own content -- both reduce how much a huge hex view can drag down
+       unrelated updates elsewhere on the page (e.g. the progress bar during
+       a later read). content-visibility is Chromium-only, harmless no-op
+       elsewhere -- this whole tool already requires Chromium for Web Serial. */
+    contain: content;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 400px;
+  }
+  .placeholder { color: var(--muted); font-style: italic; }
+  .diff-changed { background: #7a5c00; color: #fff; }
+  .diff-added   { background: #1f6f3a; color: #fff; }
+  .diff-missing { background: #7a1f1f; color: #fff; }
+  .diff-legend span { padding: 1px 6px; border-radius: 3px; margin-right: 4px; }
+  .bm-hover-tooltip {
+    position: fixed;
+    display: none;
+    pointer-events: none;
+    background: #000;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 3px 7px;
+    font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+    font-size: 0.72rem;
+    white-space: nowrap;
+    z-index: 10;
+  }
+</style>
+
+<h1>SPI EEPROM/Flash Reader</h1>
+<div class="sub">Web Serial + hex viewer for the STM32/GD32 SPI dumper firmware. Chrome / Edge / Opera only (Web Serial API).</div>
+
+<div class="panel">
+  <div class="row">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" class="secondary" disabled>Disconnect</button>
+    <label>Baud <input type="number" id="baud" value="2000000" step="1"></label>
+    <label>Chip
+      <select id="chipProfile">
+        <option value="m95128">M95128 (128Kbit EEPROM)</option>
+        <option value="sst25vf032b">SST25VF032B (32Mbit NOR flash)</option>
+        <option value="p25q32sh">P25Q32SH (32Mbit NOR flash)</option>
+        <option value="custom">Custom</option>
+      </select>
+    </label>
+    <label>Start addr (bytes) <input type="number" id="startAddr" value="0" step="1" style="width:90px;"></label>
+    <label>Size (bytes) <input type="number" id="size" value="16384" step="1"></label>
+    <label>Addr bytes <input type="number" id="addrBytes" value="2" step="1" style="width:60px;"></label>
+    <label>Page size (max 255 -- wire protocol byte) <input type="number" id="pageSize" value="64" step="1" max="255" style="width:70px;"></label>
+    <label>Batch size <input type="number" id="batchSize" value="64" step="1" style="width:70px;"></label>
+  </div>
+  <div class="row">
+    <button id="btnRead" disabled>Read Dump</button>
+    <button id="btnReadCompare" class="secondary" disabled>Read &amp; Compare</button>
+    <button id="btnSave" class="secondary" disabled>Save .bin</button>
+    <button id="btnIdentify" class="secondary" disabled>Identify Chip</button>
+    <button id="btnReadStatus" class="secondary" disabled>Read Status</button>
+    <button id="btnClearProtection" class="secondary" disabled>Clear Protection</button>
+    <button id="btnProtectAll" class="secondary" disabled>Protect All</button>
+    <button id="btnErase" class="secondary" disabled style="display:none;">Erase Chip</button>
+  </div>
+  <div class="row" id="identifyResultRow" style="display:none;">
+    <div id="identifyResult" style="font-size:0.85rem;"></div>
+  </div>
+  <div class="row" id="statusResultRow" style="display:none;">
+    <div id="statusResult" style="font-size:0.85rem;"></div>
+  </div>
+  <div class="row" id="readVerifyRow" style="display:none;">
+    <div id="readVerifyResult" style="font-size:0.85rem;"></div>
+  </div>
+  <div class="row">
+    <div id="status">Not connected.</div>
+    <div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
+    <div id="progressText" style="font-size:0.8rem; color: var(--muted);"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <label>Write file <input type="file" id="fileInput" accept=".bin"></label>
+    <button id="btnWrite" disabled>Write &amp; Verify</button>
+    <div id="fileInfo" style="font-size:0.8rem; color: var(--muted);"></div>
+  </div>
+  <div class="row" id="writeResultRow" style="display:none;">
+    <div id="writeResult" style="font-size:0.85rem;"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div id="hexview"><span class="placeholder">No dump yet — connect, then click "Read Dump".</span></div>
+  <div class="row" style="margin-top:10px;">
+    <button id="btnShowFullDump" class="secondary" disabled>Show Full Dump (slow on big chips)</button>
+    <label>Compare with… <input type="file" id="compareFileInput" accept=".bin" disabled></label>
+    <button id="btnClearCompare" class="secondary" disabled>Clear comparison</button>
+  </div>
+  <div class="row" id="compareResultRow" style="display:none;">
+    <div id="compareResult" style="font-size:0.85rem;"></div>
+  </div>
+  <div class="row diff-legend" id="diffLegendRow" style="display:none; font-size:0.8rem;">
+    <span class="diff-changed">changed</span>
+    <span class="diff-added">only in current dump</span>
+    <span class="diff-missing">only in compared file</span>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="sub" style="margin-bottom:12px;">
+    Bitmap / font viewer — the exact glyph format is unknown, so adjust the fields below and watch the
+    preview until shapes snap into focus. For a 1 bit/pixel format, click a pixel in the preview to toggle it.
+  </div>
+  <div class="row">
+    <label>Start offset <input type="number" id="bmOffset" value="0" step="1" style="width:90px;"></label>
+    <label>Glyph W <input type="number" id="bmWidth" value="8" step="8" style="width:60px;"></label>
+    <label>Glyph H <input type="number" id="bmHeight" value="24" step="1" style="width:60px;"></label>
+    <label>Bits/px
+      <select id="bmBpp">
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+        <option value="8">8</option>
+      </select>
+    </label>
+    <label>Bit order
+      <select id="bmBitOrder">
+        <option value="msb" selected>MSB first</option>
+        <option value="lsb">LSB first</option>
+      </select>
+    </label>
+    <label>Packing
+      <select id="bmPacking">
+        <option value="byte" selected>Byte-aligned rows (pad to byte)</option>
+        <option value="bit">Continuous (bit-packed, no padding)</option>
+      </select>
+    </label>
+    <label>Rotate
+      <select id="bmRotate">
+        <option value="0" selected>None</option>
+        <option value="90">90° CW</option>
+        <option value="180">180°</option>
+        <option value="270">90° CCW</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label>Row stride (bytes, blank=auto) <input type="number" id="bmRowStride" placeholder="auto" style="width:90px;"></label>
+    <label>Glyph stride (bytes, blank=auto) <input type="number" id="bmGlyphStride" placeholder="auto" style="width:100px;"></label>
+    <label>Columns <input type="number" id="bmCols" value="16" step="1" style="width:60px;"></label>
+    <label>Glyph count (page size) <input type="number" id="bmCount" value="4096" step="1" style="width:70px;"></label>
+    <button type="button" id="btnBmPrevPage" class="secondary">◀ Prev page</button>
+    <button type="button" id="btnBmNextPage" class="secondary">Next page ▶</button>
+    <label>Zoom <input type="number" id="bmZoom" value="6" step="1" style="width:50px;"></label>
+    <label><input type="checkbox" id="bmInvert"> Invert</label>
+    <label><input type="checkbox" id="bmEditMode"> Edit pixels on click (off = click realigns there)</label>
+    <button type="button" id="btnBmUndoOffset" class="secondary">Undo offset</button>
+  </div>
+  <div class="row">
+    <label>Page <input type="number" id="bmPageInput" value="1" min="1" step="1" style="width:60px;"></label>
+    <span>of <span id="bmTotalPages">1</span></span>
+    <input type="range" id="bmPageSlider" min="1" max="1" value="1" step="1" style="width:260px; vertical-align:middle;">
+  </div>
+  <div class="row">
+    <button id="btnBitmapReset" class="secondary">Reset edits</button>
+    <button id="btnBitmapApplyToWrite" class="secondary">Load edits into Write buffer</button>
+    <button id="btnBitmapExportRegion" class="secondary">Export region as .bin</button>
+    <button id="btnBitmapSaveDump" class="secondary">Save edited dump as .bin</button>
+    <div id="bmStrideInfo" style="font-size:0.8rem; color: var(--muted);"></div>
+  </div>
+  <div class="row">
+    <div style="position:relative; overflow:auto; max-height:60vh; border:1px solid var(--border); border-radius:8px; background:#222;">
+      <canvas id="bitmapCanvas" width="1" height="1" style="display:block;"></canvas>
+      <div id="bmHoverTooltip" class="bm-hover-tooltip"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const btnConnect = document.getElementById('btnConnect');
+const btnDisconnect = document.getElementById('btnDisconnect');
+const btnRead = document.getElementById('btnRead');
+const btnReadCompare = document.getElementById('btnReadCompare');
+const btnSave = document.getElementById('btnSave');
+const btnErase = document.getElementById('btnErase');
+const baudInput = document.getElementById('baud');
+const chipProfileSelect = document.getElementById('chipProfile');
+const startAddrInput = document.getElementById('startAddr');
+const sizeInput = document.getElementById('size');
+const addrBytesInput = document.getElementById('addrBytes');
+const pageSizeInput = document.getElementById('pageSize');
+const statusEl = document.getElementById('status');
+const progressBar = document.getElementById('progressBar');
+const progressText = document.getElementById('progressText');
+const hexview = document.getElementById('hexview');
+const btnShowFullDump = document.getElementById('btnShowFullDump');
+const compareFileInput = document.getElementById('compareFileInput');
+const btnClearCompare = document.getElementById('btnClearCompare');
+const compareResultRow = document.getElementById('compareResultRow');
+const compareResult = document.getElementById('compareResult');
+const diffLegendRow = document.getElementById('diffLegendRow');
+const fileInput = document.getElementById('fileInput');
+const btnWrite = document.getElementById('btnWrite');
+const fileInfo = document.getElementById('fileInfo');
+const writeResultRow = document.getElementById('writeResultRow');
+const writeResult = document.getElementById('writeResult');
+const batchSizeInput = document.getElementById('batchSize');
+const btnIdentify = document.getElementById('btnIdentify');
+const identifyResultRow = document.getElementById('identifyResultRow');
+const identifyResult = document.getElementById('identifyResult');
+const btnReadStatus = document.getElementById('btnReadStatus');
+const btnClearProtection = document.getElementById('btnClearProtection');
+const btnProtectAll = document.getElementById('btnProtectAll');
+const statusResultRow = document.getElementById('statusResultRow');
+const statusResult = document.getElementById('statusResult');
+
+const bmOffsetInput = document.getElementById('bmOffset');
+const bmWidthInput = document.getElementById('bmWidth');
+const bmHeightInput = document.getElementById('bmHeight');
+const bmBppSelect = document.getElementById('bmBpp');
+const bmBitOrderSelect = document.getElementById('bmBitOrder');
+const bmPackingSelect = document.getElementById('bmPacking');
+const bmRotateSelect = document.getElementById('bmRotate');
+const bmRowStrideInput = document.getElementById('bmRowStride');
+const bmGlyphStrideInput = document.getElementById('bmGlyphStride');
+const bmColsInput = document.getElementById('bmCols');
+const bmCountInput = document.getElementById('bmCount');
+const bmZoomInput = document.getElementById('bmZoom');
+const bmInvertCheckbox = document.getElementById('bmInvert');
+const bmEditModeCheckbox = document.getElementById('bmEditMode');
+const bmStrideInfo = document.getElementById('bmStrideInfo');
+const btnBmPrevPage = document.getElementById('btnBmPrevPage');
+const btnBmNextPage = document.getElementById('btnBmNextPage');
+const btnBmUndoOffset = document.getElementById('btnBmUndoOffset');
+const bmPageInput = document.getElementById('bmPageInput');
+const bmTotalPagesSpan = document.getElementById('bmTotalPages');
+const bmPageSlider = document.getElementById('bmPageSlider');
+const btnBitmapReset = document.getElementById('btnBitmapReset');
+const btnBitmapApplyToWrite = document.getElementById('btnBitmapApplyToWrite');
+const btnBitmapExportRegion = document.getElementById('btnBitmapExportRegion');
+const btnBitmapSaveDump = document.getElementById('btnBitmapSaveDump');
+const bitmapCanvas = document.getElementById('bitmapCanvas');
+const bmHoverTooltip = document.getElementById('bmHoverTooltip');
+
+// Presets for known parts; "custom" leaves the fields as manually typed.
+// batchSize is a round-trip/perf knob, independent of the chip's real page
+// size -- big for NOR flash since page_size=1 there (see main.c 'W' notes).
+// jedec (if present) is the expected [manufacturer, type, capacity] triplet
+// from that part's datasheet, used to sanity-check "Identify Chip" against it.
+const CHIP_PROFILES = {
+  m95128:      { size: 16384,   addrBytes: 2, pageSize: 64, batchSize: 64,   needsErase: false },
+  sst25vf032b: { size: 4194304, addrBytes: 3, pageSize: 1,   batchSize: 4096, needsErase: true, jedec: [0xbf, 0x25, 0x4a] },
+  // pageSize is deliberately 128, not the chip's real 256-byte page: the
+  // wire protocol's page_size field is a single byte (main.c's 'W' command),
+  // so 256 wraps to 0 and causes a division-by-zero (batch_size/page_size)
+  // in eeprom_program() that hangs the MCU solid until power-cycled. 128
+  // divides the real 256-byte page evenly -- two Page Program commands per
+  // page instead of one, still lands correctly within the page boundary.
+  p25q32sh:    { size: 4194304, addrBytes: 3, pageSize: 128, batchSize: 4096, needsErase: true, jedec: [0x85, 0x60, 0x16] },
+  custom:      null,
+};
+
+// Well-known JEDEC manufacturer IDs -- just for a friendly hint, not authoritative.
+const JEDEC_MANUFACTURERS = {
+  0xbf: 'SST / Microchip', 0xef: 'Winbond', 0xc2: 'Macronix', 0x1f: 'Adesto/Atmel',
+  0xc8: 'GigaDevice', 0x20: 'Micron/ST', 0x9d: 'ISSI', 0x01: 'Cypress/Spansion',
+  0xa1: 'Fudan', 0x0b: 'XTX', 0x68: 'Boya', 0x5e: 'Zbit Semiconductor (unconfirmed)', 0x85: 'Puya',
+};
+
+// Most modern 25-series-compatible SPI NOR flash (Winbond/GigaDevice/XTX/Zbit/
+// Boya and clones) encode capacity as a power of two: byte N -> 2^N bytes.
+// Older/different families (e.g. SST's own pre-Microchip catalog) use their own
+// arbitrary device codes instead, so this is a strong hint, not a guarantee --
+// only trust it when it lands on a plausible flash size (256B .. 1GB).
+function guessCapacityFromByte(cap) {
+  if (cap < 0x08 || cap > 0x1e) return null;
+  return 1 << cap;
+}
+
+let port = null;
+let dumpBytes = null;
+let writeFileBytes = null;
+// Whichever bytes the hex view / Show Full Dump / Compare currently operate
+// on -- a chip read (dumpBytes) or a file picked for writing (writeFileBytes),
+// whichever was loaded most recently. Pure client-side rendering, so it's
+// independent of whether a serial port is connected.
+let hexViewSource = null;
+
+function applyChipProfile() {
+  const profile = CHIP_PROFILES[chipProfileSelect.value];
+  if (profile) {
+    sizeInput.value = profile.size;
+    addrBytesInput.value = profile.addrBytes;
+    pageSizeInput.value = profile.pageSize;
+    batchSizeInput.value = profile.batchSize;
+  }
+  const needsErase = profile ? profile.needsErase : false;
+  btnErase.style.display = needsErase ? '' : 'none';
+  // Read Status/Clear Protection/Protect All operate on the SPI status
+  // register (RDSR/WRSR), which plain EEPROMs (e.g. M95128) implement just
+  // as much as NOR flash -- only Erase (0x60) and JEDEC ID are NOR-specific,
+  // so these stay visible regardless of chip profile.
+  if (writeFileBytes) fileInput.dispatchEvent(new Event('change'));
+  updateWriteEnabled();
+}
+
+chipProfileSelect.addEventListener('change', applyChipProfile);
+applyChipProfile();
+
+// 4-byte little-endian encoding, matching usart1_recv_u32le() in main.c
+function u32le(n) {
+  return new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]);
+}
+
+// 2-byte little-endian encoding, matching usart1_recv_u16le() in main.c
+function u16le(n) {
+  return new Uint8Array([n & 0xff, (n >> 8) & 0xff]);
+}
+
+function concatBytes(...arrays) {
+  const total = arrays.reduce((n, a) => n + a.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrays) { out.set(a, offset); offset += a.length; }
+  return out;
+}
+
+function setStatus(msg, cls) {
+  statusEl.innerHTML = cls ? `<span class="${cls}">${msg}</span>` : msg;
+}
+
+let lastProgressUpdateMs = 0;
+function setProgress(done, total) {
+  // Throttled to ~20 updates/sec -- touching the DOM on every single incoming
+  // chunk can contend with the main thread. Always flush on completion though.
+  const now = performance.now();
+  if (done < total && now - lastProgressUpdateMs < 50) return;
+  lastProgressUpdateMs = now;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  progressBar.style.width = pct + '%';
+  progressText.textContent = total ? `${done} / ${total} bytes (${pct}%)` : '';
+}
+
+if (!('serial' in navigator)) {
+  setStatus('Web Serial API is not available in this browser. Use Chrome, Edge, or Opera.', 'err');
+  btnConnect.disabled = true;
+}
+
+btnConnect.addEventListener('click', async () => {
+  try {
+    port = await navigator.serial.requestPort();
+    const baudRate = parseInt(baudInput.value, 10) || 115200;
+    await port.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
+    setStatus(`Connected at ${baudRate} baud.`, 'ok');
+    btnConnect.disabled = true;
+    btnDisconnect.disabled = false;
+    setPortBusy(false);
+  } catch (err) {
+    if (/already open/i.test(err.message)) {
+      // Leftover lock from a previously-interrupted operation (see
+      // closePort()) -- clean it up automatically so the user doesn't have
+      // to reload the page, and ask them to just try Connect once more.
+      await closePort();
+      setStatus('Port was stuck open from a previous session (likely an interrupted operation) — cleaned up, click Connect again.', 'err');
+    } else {
+      setStatus('Connect failed: ' + err.message, 'err');
+    }
+  }
+});
+
+btnDisconnect.addEventListener('click', async () => {
+  await closePort();
+  setStatus('Disconnected.');
+  btnConnect.disabled = false;
+  btnDisconnect.disabled = true;
+  setPortBusy(false); // port is now null, so this disables every port-dependent button
+  // btnShowFullDump/compareFileInput/btnClearCompare are pure client-side
+  // rendering over whatever's in hexViewSource -- they don't need a live
+  // connection, so disconnecting doesn't disable them.
+  updateWriteEnabled();
+});
+
+function updateWriteEnabled() {
+  const total = parseInt(sizeInput.value, 10) || 16384;
+  btnWrite.disabled = !(port && writeFileBytes && writeFileBytes.length === total);
+}
+
+// Every button below shares one physical UART link, so only one of them may
+// ever be mid-operation at a time -- confirmed via live SWD debugging that a
+// stray click on an unrelated button (e.g. Read Status) while a Write was
+// still streaming batches interleaves bytes on the same connection and hangs
+// the MCU exactly like a dropped cable does (parked forever in
+// usart1_recv_byte()'s RXNE wait with no way back short of a power-cycle).
+// Handlers used to each hand-roll their own disable/enable list, and several
+// were missing buttons outside their own primary path (Write in particular
+// barely touched anything else) -- centralizing it here means every
+// operation now blocks literally everything else, no exceptions to miss.
+const PORT_BUSY_BUTTONS = [btnRead, btnReadCompare, btnWrite, btnErase, btnIdentify, btnReadStatus, btnClearProtection, btnProtectAll];
+function setPortBusy(busy) {
+  if (busy) {
+    for (const btn of PORT_BUSY_BUTTONS) btn.disabled = true;
+    return;
+  }
+  const connected = !!port;
+  btnRead.disabled = !connected;
+  btnErase.disabled = !connected;
+  btnIdentify.disabled = !connected;
+  btnReadStatus.disabled = !connected;
+  btnClearProtection.disabled = !connected;
+  btnProtectAll.disabled = !connected;
+  btnReadCompare.disabled = !(connected && hexViewSource);
+  updateWriteEnabled();
+}
+
+sizeInput.addEventListener('input', () => {
+  if (writeFileBytes) fileInput.dispatchEvent(new Event('change'));
+  else updateWriteEnabled();
+});
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) {
+    writeFileBytes = null;
+    fileInfo.textContent = '';
+    // Fall back to showing the read dump again, if there is one.
+    hexViewSource = dumpBytes;
+    if (hexViewSource) {
+      hexview.textContent = toHexDump(hexViewSource, HEXDUMP_PREVIEW_BYTES);
+    } else {
+      hexview.innerHTML = '<span class="placeholder">No dump yet — connect, then click "Read Dump".</span>';
+    }
+    btnShowFullDump.disabled = !hexViewSource;
+    compareFileInput.disabled = !hexViewSource;
+    diffLegendRow.style.display = 'none';
+    compareResultRow.style.display = 'none';
+    bitmapWorkingBytes = null;
+    bmEndClickSession(); // stale session would reference a buffer that no longer exists
+    renderBitmap();
+    updateWriteEnabled();
+    return;
+  }
+  const buf = await file.arrayBuffer();
+  writeFileBytes = new Uint8Array(buf);
+  const total = parseInt(sizeInput.value, 10) || 16384;
+  if (writeFileBytes.length !== total) {
+    fileInfo.innerHTML = `<span class="err">${file.name}: ${writeFileBytes.length} bytes, expected ${total}</span>`;
+  } else {
+    fileInfo.textContent = `${file.name}: ${writeFileBytes.length} bytes, ready.`;
+  }
+  // Same cheap preview convention as after a read -- lets you sanity-check the
+  // file's contents before writing it. Show Full Dump/Compare/Bitmap Viewer now
+  // operate on this file too (hexViewSource), not just on a chip read.
+  hexViewSource = writeFileBytes;
+  diffLegendRow.style.display = 'none';
+  compareResultRow.style.display = 'none';
+  hexview.textContent = toHexDump(hexViewSource, HEXDUMP_PREVIEW_BYTES);
+  btnShowFullDump.disabled = false;
+  compareFileInput.disabled = false;
+  bitmapWorkingBytes = null; // fresh source -- drop stale edits, next renderBitmap() reinitializes from it
+  bmEndClickSession();
+  renderBitmap();
+  updateWriteEnabled();
+});
+
+async function closePort() {
+  if (!port) return;
+  try {
+    await port.close();
+  } catch (e) {
+    // close() throws if a reader/writer lock from some earlier operation was
+    // never released -- e.g. the device physically dropped off mid-write, so
+    // that handler's finally block never got to call releaseLock(). The
+    // browser then thinks the port is still open even after we give up our
+    // reference to it, and the next Connect fails with "port is already
+    // open" with no way to recover short of reloading the page. forget()
+    // fully revokes our permission to the port as a last-resort cleanup --
+    // the next Connect just shows the picker again instead of silently
+    // failing forever.
+    try { await port.forget?.(); } catch (e2) { /* ignore */ }
+  }
+  port = null;
+}
+
+// Wraps a Web Serial reader with a small leftover buffer. A single reader.read()
+// call can return more bytes than the caller currently wants (e.g. the device
+// batches an ACK and its payload into one USB chunk when it replies fast
+// enough) -- without carrying the excess over to the next readExact() call, it
+// would just be silently discarded and the next read would time out for no
+// visible reason. Always create one of these per reader and reuse it for every
+// readExact()/expectLinkAck() call made against that reader.
+function makeByteReader(reader) {
+  let pending = new Uint8Array(0);
+
+  async function readExact(total, onProgress, timeoutMs = 5000) {
+    const out = new Uint8Array(total);
+    let offset = 0;
+    while (offset < total) {
+      if (pending.length === 0) {
+        const timeout = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`timeout after ${offset}/${total} bytes — check wiring/baud`)), timeoutMs)
+        );
+        const { value, done } = await Promise.race([reader.read(), timeout]);
+        if (done) throw new Error(`port closed after ${offset}/${total} bytes`);
+        pending = value;
+      }
+      const n = Math.min(pending.length, total - offset);
+      out.set(pending.subarray(0, n), offset);
+      pending = pending.subarray(n);
+      offset += n;
+      if (onProgress) onProgress(offset, total);
+    }
+    return out;
+  }
+
+  // Firmware sends 0x41 right after it recognizes the command byte, before doing
+  // any SPI/EEPROM work -- this tells apart "device never even saw my command"
+  // (dead UART link: wrong COM port, wiring, baud, unpowered/unflashed board)
+  // from a downstream problem in the SPI wiring or chip itself.
+  async function expectLinkAck() {
+    let ack;
+    try {
+      ack = await readExact(1, () => {});
+    } catch (err) {
+      throw new Error('no response from device (link ACK timeout) -- check COM port, UART wiring, baud, and that the board is powered and flashed with this firmware');
+    }
+    if (ack[0] !== 0x41) {
+      throw new Error(`device replied 0x${ack[0].toString(16)} instead of the link ACK (0x41) -- firmware/protocol mismatch?`);
+    }
+  }
+
+  return { readExact, expectLinkAck };
+}
+
+// Rendering the whole dump as hex text was the real cause of the "freezes at
+// some %, jerky" symptom -- NOT the progress bar. A 4MB buffer is 262,144
+// sixteen-byte lines, each doing several string ops/padStart calls; building
+// and then laying out that much text blocks the main thread for seconds,
+// during which nothing (including the progress bar's own last update) can
+// actually paint, so completion looks like a hang. So by default only a tiny
+// preview (through address 0x1F0) is rendered after a read; the full dump is
+// only built when explicitly requested via "Show Full Dump", and reads are
+// blocked while either render is in flight (see btnShowFullDump below).
+const HEXDUMP_PREVIEW_BYTES = 0x200; // lines 0x000..0x1F0 inclusive
+
+// Matches main.c's WRITE_TIMEOUT_MS (20s) with margin -- Erase/Clear Protection/
+// each page write poll WIP on the chip side and can legitimately take a while
+// on a slow/clone part; the default 5s readExact timeout would give up (with a
+// generic "no info" message) before firmware's own, more informative NAK does.
+const WRITE_ACK_TIMEOUT_MS = 25000;
+
+function toHexDump(bytes, maxBytes) {
+  const cap = maxBytes ?? bytes.length;
+  const truncated = bytes.length > cap;
+  const view = truncated ? bytes.subarray(0, cap) : bytes;
+  const lines = [];
+  const printable = (b) => (b >= 0x20 && b <= 0x7e) ? String.fromCharCode(b) : '.';
+  for (let addr = 0; addr < view.length; addr += 16) {
+    const row = view.subarray(addr, Math.min(addr + 16, view.length));
+    let hex = '';
+    let ascii = '';
+    for (let i = 0; i < 16; i++) {
+      if (i < row.length) {
+        hex += row[i].toString(16).padStart(2, '0') + ' ';
+        ascii += printable(row[i]);
+      } else {
+        hex += '   ';
+      }
+      if (i === 7) hex += ' ';
+    }
+    lines.push(addr.toString(16).padStart(8, '0') + '  ' + hex + ' ' + ascii);
+  }
+  if (truncated) {
+    lines.push(`\n… showing first ${cap.toLocaleString()} of ${bytes.length.toLocaleString()} bytes — click "Show Full Dump" below to render the rest.`);
+  }
+  return lines.join('\n');
+}
+
+// ------------------------------------------------------------------
+// Byte-for-byte diff view against a picked file, hex-editor-"compare"
+// style -- position N in current vs. position N in the other file, no git-
+// style realignment/LCS (a flash dump is a fixed memory map, not text with
+// movable lines, so comparing by position is the actually-correct method,
+// not a simplification of a "real" diff).
+//
+// Only differing regions (plus a couple lines of context) are rendered, with
+// runs of identical bytes collapsed to a one-line marker. Two reasons: on a
+// multi-MB chip the differences are typically clustered in a small fraction
+// of the address space, so (a) rendering the whole file is both slow AND
+// makes the actual differences easy to miss while scrolling past megabytes
+// of identical hex, and (b) the "too many differences" tab-hang case (see
+// DIFF_HIGHLIGHT_MAX below) also becomes moot once collapsing is in place --
+// but the cutoff is kept anyway since a file that differs almost everywhere
+// isn't usefully summarized as hunks either.
+// ------------------------------------------------------------------
+// Firmware sends 0x06 (ACK) on success for any WIP-polling operation (page
+// writes, Erase, Clear Protection), or 0x15 (NAK) if it gave up waiting for
+// BUSY to clear (see WRITE_TIMEOUT_ITERS in main.c) -- the chip stopped
+// responding mid-operation, but the board itself recovered instead of
+// hanging forever, so this is a clean, actionable failure rather than a raw
+// link timeout with no information.
+// Decodes the diagnostic byte main.c's send_ack_or_nak() always sends right
+// after a 0x15 NAK -- the last RDSR value spi2_wait_write_done() actually saw,
+// or one of two sentinels for a NAK that never touched the chip at all: 0xEE
+// (the write header itself was rejected -- page_size/batch_size mismatch) or
+// 0xDD (the host stopped sending batch data for 5s -- USB-serial link hiccup,
+// not the chip). Lets "chip genuinely reports BUSY forever" be told apart
+// from "SPI read came back corrupted/dead" or "the link itself dropped bytes"
+// while debugging over the wire, without a second UART/console. Temporary
+// debug aid -- remove alongside g_last_status_reg in main.c once the root
+// cause is found.
+function describeNakDiag(diag) {
+  if (diag === 0xee) return 'the firmware rejected the write header itself (page_size/batch_size mismatch) -- it never touched the chip';
+  if (diag === 0xdd) return 'the firmware stopped receiving batch data from the host for 5s mid-batch -- a USB-serial link hiccup, not the chip';
+  if (diag === 0xcc) return 'a batch\'s checksum kept failing even after several resends -- the link is corrupting data faster than the retry budget can absorb, try a lower Baud or Batch size';
+  if (diag === 0xff) return `chip's last-seen status register was 0xff -- SO/MISO is reading back all 1s, ` +
+    `which usually means the chip isn't actually driving that line (broken/floating connection), not a real status value`;
+  const wip = diag & 0x01, wel = (diag >> 1) & 0x01, bp = (diag >> 2) & 0x1f;
+  return `chip's last-seen status register was 0x${diag.toString(16).padStart(2, '0')} ` +
+    `(WIP=${wip} WEL=${wel} BP=0x${bp.toString(16)}) when the firmware gave up waiting`;
+}
+
+// Reads the ACK/NAK byte and, on NAK, the diagnostic byte that always follows
+// it (see describeNakDiag above) -- replaces the old ackOrThrow(), which only
+// read 1 byte and would desync from the firmware now that every NAK carries 2.
+async function readAckOrThrow(rx, whatFailed, timeoutMs) {
+  const [byte] = await rx.readExact(1, () => {}, timeoutMs);
+  if (byte === 0x06) return;
+  if (byte === 0x15) {
+    const [diag] = await rx.readExact(1, () => {}, timeoutMs);
+    throw new Error(`${whatFailed} failed -- ${describeNakDiag(diag)}.`);
+  }
+  throw new Error(`unexpected reply 0x${byte.toString(16)} (expected ACK)`);
+}
+
+// 8-bit wrapping sum, matching main.c's checksum8() exactly -- see the 'W'
+// checksum note in main.c's protocol comment for why this exists: a real
+// multi-minute write over a USB-serial bridge silently lost a byte partway
+// through with zero protocol-level symptom (no NAK, no timeout), permanently
+// shifting everything downstream by one position -- only caught after the
+// fact by the post-write full-chip verify. Now every batch is checksummed
+// and retried in place instead of silently landing on the chip corrupted.
+function checksum8(bytes) {
+  let sum = 0;
+  for (let i = 0; i < bytes.length; i++) sum = (sum + bytes[i]) & 0xff;
+  return sum;
+}
+
+// Sends one batch + its checksum byte, retrying the SAME batch whenever the
+// firmware replies 0x43 ('C', checksum mismatch) -- the firmware caps how
+// many times it'll ask for a resend (WRITE_BATCH_RETRY_MAX) before giving up
+// with a real NAK, so this loop is always bounded by the device, not the host.
+async function sendBatchWithChecksum(writer, rx, batch, whatFailed, timeoutMs) {
+  const withChecksum = concatBytes(batch, new Uint8Array([checksum8(batch)]));
+  for (;;) {
+    await writer.write(withChecksum);
+    const [byte] = await rx.readExact(1, () => {}, timeoutMs);
+    if (byte === 0x06) return;
+    if (byte === 0x43) continue; // checksum mismatch -- firmware wants the same batch resent
+    if (byte === 0x15) {
+      const [diag] = await rx.readExact(1, () => {}, timeoutMs);
+      throw new Error(`${whatFailed} failed -- ${describeNakDiag(diag)}.`);
+    }
+    throw new Error(`unexpected reply 0x${byte.toString(16)} (expected ACK)`);
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+const DIFF_CONTEXT_LINES = 2; // lines of identical context shown around each differing region
+
+// Fast pass: counts + a per-16-byte-line "differs" bitmap, no string building
+// -- O(n) byte compares only, same ballpark cost as the SHA-256 hashing we
+// already do on full dumps elsewhere. The bitmap lets the actual render pass
+// (below) skip straight to the interesting lines instead of visiting all of
+// them.
+function analyzeDiff(current, other) {
+  const minLen = Math.min(current.length, other.length);
+  const maxLen = Math.max(current.length, other.length);
+  const totalLines = Math.ceil(maxLen / 16) || 1;
+  const dirtyLine = new Uint8Array(totalLines);
+  let numChanged = 0;
+  for (let i = 0; i < minLen; i++) {
+    if (current[i] !== other[i]) { numChanged++; dirtyLine[(i / 16) | 0] = 1; }
+  }
+  for (let i = minLen; i < maxLen; i++) { dirtyLine[(i / 16) | 0] = 1; }
+  return {
+    numChanged,
+    numOnlyInCurrent: Math.max(0, current.length - other.length),
+    numOnlyInOther: Math.max(0, other.length - current.length),
+    maxLen,
+    totalLines,
+    dirtyLine,
+  };
+}
+
+// Renders one row of `primary` bytes at [addr, addr+16), highlighting each
+// byte that differs from `reference` at the same position -- used for both
+// the "current" row and (for dirty lines only) the paired "compared file"
+// row, swapping which array is primary vs. reference so both sides show
+// their own actual byte values with the same highlighting logic.
+function formatDiffRow(label, primary, reference, addr, maxLen) {
+  const printable = (b) => (b >= 0x20 && b <= 0x7e) ? String.fromCharCode(b) : '.';
+  let hex = '';
+  let ascii = '';
+  for (let i = 0; i < 16; i++) {
+    const pos = addr + i;
+    if (pos >= maxLen) {
+      hex += '   ';
+      if (i === 7) hex += ' ';
+      continue;
+    }
+    const inPrimary = pos < primary.length;
+    const inRef = pos < reference.length;
+    let cls = null;
+    let b;
+    if (inPrimary && inRef) {
+      b = primary[pos];
+      if (primary[pos] !== reference[pos]) cls = 'diff-changed';
+    } else if (inPrimary) {
+      b = primary[pos]; cls = 'diff-added';
+    } else {
+      b = 0; cls = 'diff-missing'; /* nothing at this position on this side */
+    }
+    const hexStr = b.toString(16).padStart(2, '0');
+    const asciiStr = escapeHtml(printable(b));
+    if (cls) {
+      hex += `<span class="${cls}">${hexStr}</span> `;
+      ascii += `<span class="${cls}">${asciiStr}</span>`;
+    } else {
+      hex += hexStr + ' ';
+      ascii += asciiStr;
+    }
+    if (i === 7) hex += ' ';
+  }
+  return label + '  ' + hex + ' ' + ascii;
+}
+
+function buildDiffHexView(current, other, dirtyLine, totalLines, maxLen) {
+  const lines = [];
+  let skippedLines = 0;
+
+  const flushSkip = () => {
+    if (skippedLines > 0) {
+      lines.push(`          … ${(skippedLines * 16).toLocaleString()} identical bytes skipped …`);
+      skippedLines = 0;
+    }
+  };
+
+  for (let l = 0; l < totalLines; l++) {
+    const dirty = dirtyLine[l] === 1;
+    let show = dirty;
+    if (!show) {
+      for (let k = Math.max(0, l - DIFF_CONTEXT_LINES); k <= Math.min(totalLines - 1, l + DIFF_CONTEXT_LINES); k++) {
+        if (dirtyLine[k]) { show = true; break; }
+      }
+    }
+    if (!show) { skippedLines++; continue; }
+    flushSkip();
+
+    const addr = l * 16;
+    lines.push(formatDiffRow(addr.toString(16).padStart(8, '0'), current, other, addr, maxLen));
+    if (dirty) {
+      // Paired row: the compared file's own bytes at this same address, so
+      // it's clear what each highlighted byte actually changed *from*/*to*
+      // instead of just seeing "changed" with no idea what the other value was.
+      lines.push(formatDiffRow('  (cmp) ', other, current, addr, maxLen));
+    }
+  }
+  flushSkip();
+  return lines.join('\n');
+}
+
+compareFileInput.addEventListener('change', async () => {
+  const file = compareFileInput.files[0];
+  if (!file || !hexViewSource) return;
+
+  btnRead.disabled = true;
+  btnReadCompare.disabled = true;
+  btnShowFullDump.disabled = true;
+  compareFileInput.disabled = true;
+  btnClearCompare.disabled = true;
+  compareResultRow.style.display = 'none';
+  setStatus(`Comparing against ${file.name}…`);
+  await new Promise((resolve) => requestAnimationFrame(resolve)); // let the status above paint before the heavy render
+
+  const otherBytes = new Uint8Array(await file.arrayBuffer());
+  const counts = analyzeDiff(hexViewSource, otherBytes); // cheap: counts + dirty-line bitmap, no HTML yet
+  const totalDiff = counts.numChanged + counts.numOnlyInCurrent + counts.numOnlyInOther;
+  const DIFF_HIGHLIGHT_MAX = 5000; // above this, differences are too spread out for hunks+context to stay cheap/useful
+
+  compareResultRow.style.display = '';
+  if (totalDiff === 0) {
+    hexview.textContent = toHexDump(hexViewSource, HEXDUMP_PREVIEW_BYTES);
+    diffLegendRow.style.display = 'none';
+    compareResult.innerHTML = `<span class="ok">Identical to ${file.name} (${counts.maxLen.toLocaleString()} bytes).</span>`;
+    setStatus('Compare: identical.', 'ok');
+  } else if (totalDiff > DIFF_HIGHLIGHT_MAX) {
+    hexview.textContent = toHexDump(hexViewSource, HEXDUMP_PREVIEW_BYTES);
+    diffLegendRow.style.display = 'none';
+    compareResult.innerHTML = `<span class="err">${totalDiff.toLocaleString()} byte(s) differ vs ${file.name} ` +
+      `(${counts.numChanged.toLocaleString()} changed, ${counts.numOnlyInCurrent.toLocaleString()} only in current, ` +
+      `${counts.numOnlyInOther.toLocaleString()} only in ${file.name}) — too many/too spread out to show as hunks safely ` +
+      `(these look like unrelated/very different files), showing a plain preview instead.</span>`;
+    setStatus(`Compare: ${totalDiff.toLocaleString()} byte(s) differ (too many to highlight).`, 'err');
+  } else {
+    const html = buildDiffHexView(hexViewSource, otherBytes, counts.dirtyLine, counts.totalLines, counts.maxLen);
+    hexview.innerHTML = html;
+    diffLegendRow.style.display = '';
+    compareResult.innerHTML = `<span class="err">${totalDiff.toLocaleString()} byte(s) differ vs ${file.name}: ` +
+      `${counts.numChanged.toLocaleString()} changed, ${counts.numOnlyInCurrent.toLocaleString()} only in current, ` +
+      `${counts.numOnlyInOther.toLocaleString()} only in ${file.name}. Showing only the differing regions below (identical stretches collapsed).</span>`;
+    setStatus(`Compare: ${totalDiff.toLocaleString()} byte(s) differ.`, 'err');
+  }
+
+  btnRead.disabled = false;
+  btnReadCompare.disabled = false;
+  btnShowFullDump.disabled = false;
+  compareFileInput.disabled = false;
+  btnClearCompare.disabled = false;
+  compareFileInput.value = ''; // allow picking the same file again later
+});
+
+btnClearCompare.addEventListener('click', () => {
+  if (!hexViewSource) return;
+  hexview.textContent = toHexDump(hexViewSource, HEXDUMP_PREVIEW_BYTES);
+  compareResultRow.style.display = 'none';
+  diffLegendRow.style.display = 'none';
+  btnClearCompare.disabled = true;
+  setStatus('Comparison cleared.');
+});
+
+// ------------------------------------------------------------------
+// Bitmap / font viewer -- glyph format is unknown up front, so every
+// parameter is adjustable and re-renders live; the workflow is to tweak
+// width/height/stride until recognizable shapes appear. bitmapWorkingBytes
+// is a separate editable copy so pixel edits never touch dumpBytes/the
+// saved file directly until explicitly pushed into the write buffer.
+// ------------------------------------------------------------------
+let bitmapWorkingBytes = null;
+
+// The cols/count actually used by the last renderBitmap() call (may differ
+// from the raw field values if the safe-canvas-size clamp kicked in) -- the
+// click handler needs these, not the nominal ones, to map a click back to
+// the right glyph.
+let lastBitmapLayout = null;
+
+// Tracks the current run of realign clicks so "Undo offset" reverts the
+// WHOLE run back to how things were before the first click in it, in one
+// press -- not one click at a time. This works because every click's bit
+// rotation is applied to the SAME fixed-length buffer, and consecutive
+// same-length circular rotations compose by simple addition
+// (rotateLeft(k1) then rotateLeft(k2) == rotateLeft((k1+k2) mod 8)), so the
+// whole run's net rotation can be tracked as one running total instead of a
+// per-click stack.
+//   offset:      the byte offset from BEFORE the first click of this run
+//   netRollBits: cumulative bit-rotation (mod 8) applied since then
+// null when there's no in-progress run (nothing to undo, or the last run was
+// already undone/superseded). Page nav, Reset edits, and loading a fresh
+// dump/file all end the current run (see bmEndClickSession below) -- "Undo
+// offset" is only ever asked to undo realign clicks, not those actions.
+let bmClickSession = null;
+
+function bmEndClickSession() {
+  bmClickSession = null;
+}
+
+function getBitmapParams() {
+  return {
+    offset: parseInt(bmOffsetInput.value, 10) || 0,
+    width: Math.max(1, parseInt(bmWidthInput.value, 10) || 8),
+    height: Math.max(1, parseInt(bmHeightInput.value, 10) || 24),
+    bpp: parseInt(bmBppSelect.value, 10) || 1,
+    msbFirst: bmBitOrderSelect.value === 'msb',
+    packing: bmPackingSelect.value, // 'byte' = rows padded to a byte boundary; 'bit' = continuous, no padding
+    rotate: parseInt(bmRotateSelect.value, 10) || 0, // display rotation in degrees CW; data layout is unchanged
+    rowStrideOverride: bmRowStrideInput.value ? parseInt(bmRowStrideInput.value, 10) : null,
+    glyphStrideOverride: bmGlyphStrideInput.value ? parseInt(bmGlyphStrideInput.value, 10) : null,
+    cols: Math.max(1, parseInt(bmColsInput.value, 10) || 16),
+    count: Math.max(1, parseInt(bmCountInput.value, 10) || 256),
+    zoom: Math.max(1, parseInt(bmZoomInput.value, 10) || 6),
+    invert: bmInvertCheckbox.checked,
+  };
+}
+
+function effectiveStrides(p) {
+  const rowStride = p.rowStrideOverride ?? Math.ceil((p.width * p.bpp) / 8);
+  const glyphStride = p.glyphStrideOverride ?? (rowStride * p.height);
+  return { rowStride, glyphStride };
+}
+
+// Circular bit-rotate of the ENTIRE working buffer by k bits (0-7; k=0 is a
+// no-op), treating all of bitmapWorkingBytes as one big concatenated bit
+// string. This is how a sub-byte realignment gets applied: rather than
+// tracking a separate "bit phase" alongside the byte-granular Start offset
+// (which stops working cleanly once you need it to combine with height/width
+// > 8 bits), the fractional bits are baked directly into the array, so a
+// plain byte offset is always enough afterwards to describe where reading
+// starts -- regardless of glyph size. Bits that fall off one end wrap into
+// the other, so nothing is ever lost.
+//
+// Left and right are genuinely different operations here, NOT inverses of
+// each other via `8 - k`: rotating an N-byte array left by k bits and then
+// left by (8-k) bits totals a rotation by a whole 8 bits, which for N > 1
+// byte is a whole-BYTE rotation of the array, not the identity. To undo a
+// left-rotate by k you must right-rotate by that same k.
+function rotateBitsLeft(bytes, k) {
+  k = ((k % 8) + 8) % 8;
+  if (k === 0) return bytes;
+  const len = bytes.length;
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    const next = bytes[(i + 1) % len];
+    out[i] = ((bytes[i] << k) | (next >> (8 - k))) & 0xFF;
+  }
+  return out;
+}
+
+function rotateBitsRight(bytes, k) {
+  k = ((k % 8) + 8) % 8;
+  if (k === 0) return bytes;
+  const len = bytes.length;
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    const prev = bytes[(i - 1 + len) % len];
+    out[i] = ((bytes[i] >> k) | (prev << (8 - k))) & 0xFF;
+  }
+  return out;
+}
+
+// Shifts the working buffer's read alignment by an arbitrary (possibly
+// negative) number of bits: the whole-byte part moves the Start offset field
+// as before, and any sub-byte remainder is rotated directly into
+// bitmapWorkingBytes via rotateBitsLeft. Pure mutation, no history -- used by
+// page nav (Next/Prev/Jump), which has its own "N of M" notion of position
+// and shouldn't be undoable through the realign-click Undo button below.
+//
+// Clamping happens on the ABSOLUTE target bit position, not on the byte part
+// alone: Start offset can never go negative (there's no data before byte 0),
+// but the buffer is always kept at zero residual bit-phase relative to it
+// (every previous call already baked its own remainder in). So the target's
+// clamped value is itself always byte-aligned when the clamp actually bites,
+// and re-deriving byteShift/bitRemainder from the CLAMPED target (rather than
+// clamping the byte offset after already applying the raw, unclamped
+// rotation) keeps the two in sync. Rotating unconditionally by the raw
+// remainder while separately clamping the offset -- which under 90/270°
+// rotation is easy to hit, since clicking almost anywhere in a rotated cell
+// asks to move backward by several whole rows -- left a "phantom" rotation
+// baked into the buffer with no matching offset change, which is invisible
+// until the *next* click computes its delta against that silently-wrong
+// state and compounds it further.
+// Returns the bit-remainder it actually rotated into the buffer (0 if none),
+// so callers that need to record history (bmShiftOffset below) reflect
+// reality instead of recomputing their own guess from the pre-clamp delta,
+// which would disagree with the buffer whenever the clamp changed the result.
+function applyOffsetShift(deltaBits) {
+  if (!bitmapWorkingBytes || deltaBits === 0) return 0;
+  const currentBytes = parseInt(bmOffsetInput.value, 10) || 0;
+  const targetAbsBits = Math.max(0, currentBytes * 8 + deltaBits);
+  const actualDeltaBits = targetAbsBits - currentBytes * 8;
+  const bitRemainder = ((actualDeltaBits % 8) + 8) % 8;
+  if (bitRemainder !== 0) bitmapWorkingBytes = rotateBitsLeft(bitmapWorkingBytes, bitRemainder);
+  bmOffsetInput.value = Math.floor(targetAbsBits / 8);
+  return bitRemainder;
+}
+
+// Same as applyOffsetShift, but folds the move into the current bmClickSession
+// (starting a new one if none is open) so "Undo offset" can revert the WHOLE
+// run of clicks in one press. The rotation amount actually applied (taken
+// from applyOffsetShift's return value, so it can never disagree with what
+// really happened to the buffer) accumulates into netRollBits; the session's
+// baseline `offset` is only set once, on the first click of a run. Used only
+// by the realign click -- page nav intentionally goes through
+// applyOffsetShift directly instead (see its comment) so paging around
+// doesn't get folded into this session.
+function bmShiftOffset(deltaBits) {
+  if (!bitmapWorkingBytes || deltaBits === 0) return;
+  if (!bmClickSession) bmClickSession = { offset: bmOffsetInput.value, netRollBits: 0 };
+  const rollBits = applyOffsetShift(deltaBits);
+  bmClickSession.netRollBits = (bmClickSession.netRollBits + rollBits) % 8;
+}
+
+// Bit-exact strides -- in 'byte' packing every row pads out to a whole byte
+// (leftover bits at the row's end are skipped), matching effectiveStrides()
+// above exactly (just expressed in bits). In 'bit' packing there's no
+// padding: the next row's first pixel picks up at the very next bit, so a
+// non-8-aligned width doesn't waste anything between rows or between glyphs.
+function effectiveBitStrides(p) {
+  if (p.packing === 'bit') {
+    const rowStrideBits = p.width * p.bpp;
+    return { rowStrideBits, glyphStrideBits: rowStrideBits * p.height };
+  }
+  const { rowStride, glyphStride } = effectiveStrides(p);
+  return { rowStrideBits: rowStride * 8, glyphStrideBits: glyphStride * 8 };
+}
+
+// Reads `bpp` consecutive bits starting at absolute bit position `bitPos`
+// (bit 0 = MSB or LSB of byte 0 depending on msbFirst), crossing byte
+// boundaries transparently -- needed for 'bit' packing where a pixel can
+// straddle two bytes. Reduces to the old byte-aligned math exactly when
+// bitPos/bpp never actually straddle a byte (always true for 'byte' mode,
+// since bpp is one of 1/2/4/8 and rows are padded to byte boundaries).
+function readBitsAt(bytes, bitPos, bpp, msbFirst) {
+  if (bpp === 8 && bitPos % 8 === 0) return bytes[bitPos / 8] ?? 0;
+  let value = 0;
+  for (let i = 0; i < bpp; i++) {
+    const bp = bitPos + i;
+    const byteIdx = bp >> 3;
+    const bitInByte = bp & 7;
+    const bit = msbFirst ? (7 - bitInByte) : bitInByte;
+    value = (value << 1) | (((bytes[byteIdx] ?? 0) >> bit) & 1);
+  }
+  return value;
+}
+
+function toggleBitAt(bytes, bitPos, msbFirst) {
+  const byteIdx = bitPos >> 3;
+  const bitInByte = bitPos & 7;
+  const bit = msbFirst ? (7 - bitInByte) : bitInByte;
+  if (byteIdx >= 0 && byteIdx < bytes.length) bytes[byteIdx] ^= (1 << bit);
+}
+
+// Rotation only affects how a glyph is drawn on screen -- the byte/bit layout
+// in memory is never touched. A glyph is always *read* in its native
+// data-space coordinates (dx in [0,width), dy in [0,height)); these two
+// helpers map between that data coordinate and the on-screen pixel of a cell
+// whose displayed dimensions are (w,h). For 90°/270° the displayed cell is
+// transposed, so the caller swaps width/height when sizing the cell.
+// dataToDisplay is used when painting; displayToData is its exact inverse,
+// used to turn a click back into the data bit it landed on.
+function displayCellDims(p) {
+  return (p.rotate === 90 || p.rotate === 270)
+    ? { dispW: p.height, dispH: p.width }
+    : { dispW: p.width, dispH: p.height };
+}
+
+function dataToDisplay(dx, dy, w, h, rotate) {
+  switch (rotate) {
+    case 90:  return [h - 1 - dy, dx];
+    case 180: return [w - 1 - dx, h - 1 - dy];
+    // Column-forming axis (dx -> display Y) is left un-mirrored, same as the
+    // 90° case's row-forming axis -- a data row's bytes read top-to-bottom
+    // into the display column in forward order, not reversed.
+    case 270: return [dy, dx];
+    default:  return [dx, dy];
+  }
+}
+
+function displayToData(sx, sy, w, h, rotate) {
+  switch (rotate) {
+    case 90:  return [sy, h - 1 - sx];
+    case 180: return [w - 1 - sx, h - 1 - sy];
+    case 270: return [sy, sx]; // exact inverse of dataToDisplay's case 270 above
+    default:  return [sx, sy];
+  }
+}
+
+function renderBitmap() {
+  if (!hexViewSource) return;
+  if (!bitmapWorkingBytes || bitmapWorkingBytes.length !== hexViewSource.length) {
+    bitmapWorkingBytes = hexViewSource.slice();
+  }
+  const p = getBitmapParams();
+  const { rowStride, glyphStride } = effectiveStrides(p);
+  const { rowStrideBits, glyphStrideBits } = effectiveBitStrides(p);
+
+  const gap = 1;
+  // Displayed cell is transposed under 90°/270° rotation, so its on-screen
+  // width/height come from displayCellDims, not the raw glyph W/H.
+  const { dispW, dispH } = displayCellDims(p);
+  const cellW = dispW + gap;
+  const cellH = dispH + gap;
+
+  // Browsers refuse to allocate arbitrarily large canvases (Chromium caps a
+  // single axis around 65535px and total area around 268M px^2) -- a large
+  // glyph count * zoom can sail past that and silently fail to render (blank
+  // canvas / broken-image placeholder) instead of erroring visibly. Clamp
+  // how many columns/rows actually get drawn so both the offscreen buffer
+  // and the final zoomed canvas stay within a safe margin, and say so in the
+  // status line so it's obvious why -- page forward by raising Start offset
+  // (or use "Click glyph to realign") instead of raising Glyph count further.
+  const MAX_DIM = 16000;
+  const MAX_AREA = 200000000;
+  let cols = p.cols;
+  let count = p.count;
+  let rows = Math.ceil(count / cols);
+
+  const maxColsByDim = Math.max(1, Math.floor(MAX_DIM / (cellW * p.zoom)));
+  if (cols > maxColsByDim) cols = maxColsByDim;
+
+  const maxRowsByDim = Math.max(1, Math.floor(MAX_DIM / (cellH * p.zoom)));
+  const maxRowsByArea = Math.max(1, Math.floor(MAX_AREA / ((cols * cellW * p.zoom) * (cellH * p.zoom))));
+  const maxRows = Math.min(maxRowsByDim, maxRowsByArea);
+
+  let clampNote = '';
+  if (cols < p.cols || rows > maxRows) {
+    rows = Math.min(rows, maxRows);
+    count = Math.min(count, rows * cols);
+    clampNote = ` — CLAMPED to ${count.toLocaleString()} glyphs (full request would exceed the browser's max canvas size); ` +
+      `raise Start offset by ${Math.ceil(glyphStrideBits * count / 8).toLocaleString()} to page forward, or lower Zoom/Glyph count/Columns`;
+  }
+  lastBitmapLayout = { cols, count };
+
+  const totalBits = bitmapWorkingBytes.length * 8;
+  const offsetBits = p.offset * 8;
+  const remainingBits = Math.max(0, totalBits - offsetBits);
+  const remainingGlyphs = Math.floor(remainingBits / glyphStrideBits);
+  const remainingPages = Math.ceil(remainingGlyphs / p.count);
+  const strideLabel = p.packing === 'bit'
+    ? `row stride ${rowStrideBits} bit(s), glyph stride ${glyphStrideBits} bit(s)`
+    : `row stride ${rowStride}B, glyph stride ${glyphStride}B`;
+  bmStrideInfo.textContent =
+    `${strideLabel} (${p.count} glyphs = ${(glyphStrideBits * p.count / 8).toLocaleString()}B from offset ${p.offset})${clampNote} ` +
+    `— ${remainingGlyphs.toLocaleString()} glyph(s) / ~${remainingPages.toLocaleString()} page(s) remain in the dump from this offset at the current page size`;
+
+  // Page selector reflects the *current* offset/page-size even when it got
+  // there via a realign click rather than Prev/Next -- lets you see roughly
+  // where you are and jump straight to a page instead of clicking through.
+  // Computed in bits throughout so 'bit' packing (page size not necessarily
+  // a whole number of bytes) doesn't drift/seam between pages.
+  const pageSizeBits = glyphStrideBits * p.count;
+  const totalPages = Math.max(1, Math.ceil(totalBits / pageSizeBits));
+  const currentPage = Math.min(totalPages, Math.floor(offsetBits / pageSizeBits) + 1);
+  bmPageInput.value = currentPage;
+  bmTotalPagesSpan.textContent = totalPages.toLocaleString();
+  bmPageSlider.min = 1;
+  bmPageSlider.max = totalPages;
+  bmPageSlider.value = currentPage;
+
+  const unscaledW = cols * cellW;
+  const unscaledH = rows * cellH;
+
+  // Render at native (1 source pixel = 1 buffer pixel) resolution by writing
+  // straight into an ImageData buffer, then blit it up to the zoomed size
+  // with a single drawImage() call. One ctx.fillRect() per pixel (the
+  // previous approach) meant millions of canvas API calls once `count` got
+  // into the thousands -- direct typed-array writes plus one blit avoids
+  // that entirely and is orders of magnitude faster.
+  const offscreen = document.createElement('canvas');
+  offscreen.width = unscaledW;
+  offscreen.height = unscaledH;
+  const octx = offscreen.getContext('2d');
+  const imgData = octx.createImageData(unscaledW, unscaledH);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = data[i + 1] = data[i + 2] = 0x33;
+    data[i + 3] = 255;
+  }
+
+  const maxVal = (1 << p.bpp) - 1;
+
+  for (let g = 0; g < count; g++) {
+    const glyphBitOffset = offsetBits + g * glyphStrideBits;
+    if (glyphBitOffset + glyphStrideBits > totalBits) break;
+    const baseX = (g % cols) * cellW;
+    const baseY = Math.floor(g / cols) * cellH;
+    for (let y = 0; y < p.height; y++) {
+      const rowBitOffset = glyphBitOffset + y * rowStrideBits;
+      for (let x = 0; x < p.width; x++) {
+        let v = readBitsAt(bitmapWorkingBytes, rowBitOffset + x * p.bpp, p.bpp, p.msbFirst);
+        if (p.invert) v = maxVal - v;
+        const gray = Math.round((v / maxVal) * 255);
+        // Data pixel (x,y) may land anywhere in the cell once rotated.
+        const [sx, sy] = dataToDisplay(x, y, p.width, p.height, p.rotate);
+        const idx = ((baseY + sy) * unscaledW + (baseX + sx)) * 4;
+        data[idx] = data[idx + 1] = data[idx + 2] = gray;
+        data[idx + 3] = 255;
+      }
+    }
+  }
+  octx.putImageData(imgData, 0, 0);
+
+  bitmapCanvas.width = unscaledW * p.zoom;
+  bitmapCanvas.height = unscaledH * p.zoom;
+  const ctx = bitmapCanvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(offscreen, 0, 0, unscaledW, unscaledH, 0, 0, bitmapCanvas.width, bitmapCanvas.height);
+}
+
+// Paging beats one giant canvas: jump Start offset forward/back by exactly
+// one page's worth of bytes (Glyph count * glyph stride) instead of forcing
+// the whole rest of the dump into a single (likely oversized) render.
+// Computed in bits so 'bit' packing (page size not necessarily a whole
+// number of bytes) doesn't drift/seam between pages.
+btnBmNextPage.addEventListener('click', () => {
+  if (!bitmapWorkingBytes) return;
+  const p = getBitmapParams();
+  const { glyphStrideBits } = effectiveBitStrides(p);
+  // Shifts by exactly one page's worth of bits (via applyOffsetShift, so a
+  // fractional-byte page size in 'bit' packing rolls the buffer instead of
+  // being truncated) and preserves whatever bit alignment a previous
+  // realign click baked in -- column alignment carries across pages instead
+  // of resetting every time you page forward/back. Ends any open click
+  // session ("Undo offset" is only for realign clicks, not paging) so a
+  // later realign click starts a fresh run instead of extending one from
+  // before the page turn.
+  applyOffsetShift(p.count * glyphStrideBits);
+  bmEndClickSession();
+  renderBitmap();
+});
+
+btnBmPrevPage.addEventListener('click', () => {
+  if (!bitmapWorkingBytes) return;
+  const p = getBitmapParams();
+  const { glyphStrideBits } = effectiveBitStrides(p);
+  applyOffsetShift(-p.count * glyphStrideBits);
+  bmEndClickSession();
+  renderBitmap();
+});
+
+// Manual "page N of M" jump -- lands exactly on that page's start offset
+// regardless of how the current offset got where it is (Prev/Next, a realign
+// click, or hand-typed), matching what the status line + slider show.
+function bmJumpToPage(page) {
+  if (!bitmapWorkingBytes) return;
+  const p = getBitmapParams();
+  const { glyphStrideBits } = effectiveBitStrides(p);
+  const pageSizeBits = glyphStrideBits * p.count;
+  const totalPages = Math.max(1, Math.ceil(bitmapWorkingBytes.length * 8 / pageSizeBits));
+  const clamped = Math.min(totalPages, Math.max(1, page));
+  applyOffsetShift((clamped - 1) * pageSizeBits - p.offset * 8);
+  bmEndClickSession();
+  renderBitmap();
+}
+bmPageInput.addEventListener('change', () => bmJumpToPage(parseInt(bmPageInput.value, 10) || 1));
+bmPageSlider.addEventListener('input', () => bmJumpToPage(parseInt(bmPageSlider.value, 10) || 1));
+
+// Every spin-control-like field here should respond to the mouse wheel while
+// focused/hovered, matching native browser number-input scroll behavior
+// (Chromium doesn't do this by default; Firefox does, but only inconsistently).
+function makeWheelAdjustable(el, step) {
+  el.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const s = step ?? (parseFloat(el.step) || 1);
+    const cur = parseFloat(el.value) || 0;
+    const min = el.min !== '' ? parseFloat(el.min) : -Infinity;
+    const max = el.max !== '' ? parseFloat(el.max) : Infinity;
+    el.value = Math.min(max, Math.max(min, cur + (e.deltaY < 0 ? s : -s)));
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, { passive: false });
+}
+for (const [el, step] of [
+  [bmOffsetInput, null], [bmWidthInput, null], [bmHeightInput, null],
+  [bmRowStrideInput, null], [bmGlyphStrideInput, null], [bmColsInput, null],
+  [bmCountInput, null], [bmZoomInput, null], [bmPageInput, 1], [bmPageSlider, 1],
+]) {
+  makeWheelAdjustable(el, step);
+}
+
+btnBmUndoOffset.addEventListener('click', () => {
+  if (!bmClickSession) return;
+  bmOffsetInput.value = bmClickSession.offset;
+  if (bmClickSession.netRollBits) bitmapWorkingBytes = rotateBitsRight(bitmapWorkingBytes, bmClickSession.netRollBits);
+  bmClickSession = null; // the whole run is undone in this one press -- nothing left to step back through
+  renderBitmap();
+});
+
+for (const el of [bmOffsetInput, bmWidthInput, bmHeightInput, bmBppSelect, bmBitOrderSelect, bmPackingSelect,
+                   bmRotateSelect, bmRowStrideInput, bmGlyphStrideInput, bmColsInput, bmCountInput, bmZoomInput, bmInvertCheckbox]) {
+  el.addEventListener('input', renderBitmap);
+  el.addEventListener('change', renderBitmap);
+}
+
+// Maps a mouse event over bitmapCanvas to the glyph/row/column it landed on,
+// plus the exact bit/byte address of that pixel -- shared by the click
+// handler (realign/toggle) and the hover tooltip so both agree on exactly
+// which pixel the cursor is over. Returns null if the cursor isn't over any
+// pixel (in the gap between cells, or past the last rendered glyph).
+function hitTestBitmap(e) {
+  if (!bitmapWorkingBytes) return null;
+  const p = getBitmapParams();
+  const { rowStrideBits, glyphStrideBits } = effectiveBitStrides(p);
+  const rect = bitmapCanvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (bitmapCanvas.width / rect.width);
+  const cy = (e.clientY - rect.top) * (bitmapCanvas.height / rect.height);
+  const gap = 1;
+  // The displayed cell is transposed under 90°/270°, so hit-testing uses the
+  // display dims -- same ones renderBitmap laid the grid out with.
+  const { dispW, dispH } = displayCellDims(p);
+  const cellW = (dispW + gap) * p.zoom;
+  const cellH = (dispH + gap) * p.zoom;
+  const gx = Math.floor(cx / cellW);
+  const gy = Math.floor(cy / cellH);
+  const dsx = Math.floor((cx - gx * cellW) / p.zoom); // display-space pixel within the cell
+  const dsy = Math.floor((cy - gy * cellH) / p.zoom);
+  if (dsx < 0 || dsx >= dispW || dsy < 0 || dsy >= dispH) return null;
+  // Undo the rotation to get the pixel's native data coordinate, which is what
+  // the bit offset math below is expressed in.
+  const [localX, localY] = displayToData(dsx, dsy, p.width, p.height, p.rotate);
+  // Use the *actually rendered* column count (renderBitmap may have auto-
+  // widened/clamped it to fit the canvas), not the raw field value -- using
+  // the nominal p.cols here would make g land on the wrong tile whenever
+  // clamping is active, since click coordinates are measured against the
+  // real canvas.
+  const renderedCols = lastBitmapLayout ? lastBitmapLayout.cols : p.cols;
+  const renderedCount = lastBitmapLayout ? lastBitmapLayout.count : p.count;
+  const g = gy * renderedCols + gx;
+  if (g < 0 || g >= renderedCount) return null;
+  const offsetBits = p.offset * 8;
+  const glyphBitOffset = offsetBits + g * glyphStrideBits;
+  // Position of the pixel *within its own glyph* (0 = the glyph's very first
+  // bit). Rotation is already undone, so localX/localY are data coords.
+  const intraGlyphBitOffset = localY * rowStrideBits + localX * p.bpp;
+  // Absolute bit position of the exact pixel, in this cell.
+  const pixelBitOffset = glyphBitOffset + intraGlyphBitOffset;
+  return { p, rowStrideBits, glyphStrideBits, gx, gy, g, localX, localY, pixelBitOffset };
+}
+
+bitmapCanvas.addEventListener('click', (e) => {
+  const hit = hitTestBitmap(e);
+  if (!hit) return;
+  const { p, rowStrideBits, localX, localY, pixelBitOffset } = hit;
+
+  if (!bmEditModeCheckbox.checked) {
+    // Re-anchor so the clicked pixel becomes the VISUAL top-left corner of the
+    // cell it's already in, WITHOUT moving that cell in the grid. Every glyph
+    // slot advances by the same delta, so the clicked glyph stays in its slot
+    // and only its content re-aligns.
+    //
+    // The delta must be measured in *display* space, not data space: under a
+    // 90/270 rotation the on-screen top-left corner maps to a data coordinate
+    // near the END of the glyph (e.g. data row height-1), so a raw intra-glyph
+    // delta would be almost a whole glyph and the grid would jump ~one cell.
+    // Subtracting the data-delta of the display origin (0,0) cancels that out:
+    // clicking the visual corner shifts nothing, clicking elsewhere shifts just
+    // enough to bring that pixel to the visual corner. Reduces to the plain
+    // intra-glyph delta when rotation is None (origin maps to data (0,0)).
+    const intraGlyphBitOffset = localY * rowStrideBits + localX * p.bpp;
+    const [ox, oy] = displayToData(0, 0, p.width, p.height, p.rotate);
+    const originBitOffset = oy * rowStrideBits + ox * p.bpp;
+    const shiftBits = intraGlyphBitOffset - originBitOffset;
+    // bmShiftOffset bakes any sub-byte remainder straight into
+    // bitmapWorkingBytes (see rotateBitsLeft) instead of writing it into a
+    // byte-only field, where it would just get truncated away.
+    bmShiftOffset(shiftBits);
+    renderBitmap();
+    return;
+  }
+
+  if (p.bpp !== 1) return; // pixel-toggle editing only implemented for 1 bit/pixel so far
+  toggleBitAt(bitmapWorkingBytes, pixelBitOffset, p.msbFirst);
+  renderBitmap();
+});
+
+// Hover tooltip: shows which row/column of which glyph the cursor is over,
+// plus that pixel's real address in the dump (byte, and bit-within-byte when
+// not byte-aligned) -- lets you read off exactly where a feature you're
+// looking at actually lives before clicking to realign/toggle it.
+bitmapCanvas.addEventListener('mousemove', (e) => {
+  const hit = hitTestBitmap(e);
+  if (!hit) { bmHoverTooltip.style.display = 'none'; return; }
+  const { gy, gx, localX, localY, pixelBitOffset } = hit;
+  const byteAddr = Math.floor(pixelBitOffset / 8);
+  const bitInByte = pixelBitOffset % 8;
+  const addrText = bitInByte === 0
+    ? `0x${byteAddr.toString(16)}`
+    : `0x${byteAddr.toString(16)}+${bitInByte}b`;
+  bmHoverTooltip.textContent = `row ${localY}, col ${localX} (glyph @ col ${gx} row ${gy}) — addr ${addrText}`;
+  bmHoverTooltip.style.display = 'block';
+  bmHoverTooltip.style.left = (e.clientX + 14) + 'px';
+  bmHoverTooltip.style.top = (e.clientY + 14) + 'px';
+});
+bitmapCanvas.addEventListener('mouseleave', () => {
+  bmHoverTooltip.style.display = 'none';
+});
+
+btnBitmapReset.addEventListener('click', () => {
+  if (!hexViewSource) return;
+  bitmapWorkingBytes = hexViewSource.slice();
+  bmEndClickSession(); // the fresh buffer has no relation to any in-progress click run
+  renderBitmap();
+});
+
+btnBitmapApplyToWrite.addEventListener('click', () => {
+  if (!bitmapWorkingBytes) return;
+  writeFileBytes = bitmapWorkingBytes.slice();
+  fileInfo.textContent = `Edited dump loaded as write source: ${writeFileBytes.length} bytes.`;
+  updateWriteEnabled();
+});
+
+// Slices out exactly the byte range covered by the current bitmap-viewer
+// settings and downloads it standalone -- named "..._<W>x<H>_<offset>.bin" so
+// the DWIN font-editor (github.com/SolarljodDev/font-editor) auto-detects both
+// the glyph size and the offset on open. Offset comes after WxH in the name
+// on purpose: it can't then be misread as part of the dimensions no matter
+// what digits it ends in (font-editor's own dims regex scans left to right).
+// Plain byte slice of bitmapWorkingBytes -- always exact, even after a
+// sub-byte realign click, because any bit-level shift was already baked
+// into the buffer itself by bmShiftOffset/rotateBitsLeft rather than kept as
+// a separate phase, so byte boundaries here are real, not approximate.
+btnBitmapExportRegion.addEventListener('click', () => {
+  if (!bitmapWorkingBytes) return;
+  const p = getBitmapParams();
+  const { glyphStride } = effectiveStrides(p);
+  const regionSize = glyphStride * p.count;
+  const end = Math.min(p.offset + regionSize, bitmapWorkingBytes.length);
+  if (end <= p.offset) return;
+  const region = bitmapWorkingBytes.slice(p.offset, end);
+  const blob = new Blob([region], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `extract_${p.width}x${p.height}_${String(p.offset).padStart(4, '0')}.bin`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// Downloads the WHOLE working buffer (not just the currently-viewed glyph
+// region like Export region above) -- this is what to use after pixel edits
+// in the bitmap viewer to save the full, edited dump back to disk, same
+// shape/size as the original so it can be re-opened or written back to a chip
+// later. bitmapWorkingBytes already reflects any bit-level realign clicks
+// baked in via bmShiftOffset/rotateBitsLeft, so this is exactly what's shown
+// on screen, not an approximation of it.
+btnBitmapSaveDump.addEventListener('click', () => {
+  if (!bitmapWorkingBytes) return;
+  const blob = new Blob([bitmapWorkingBytes], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'edited_dump.bin';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// Some USB-serial bridges (observed with a CP2104) degrade/drop bytes partway
+// through a long, uninterrupted continuous transfer -- worse on a second one
+// back-to-back, but the underlying cause seems to be sustained continuous
+// load in general, not specifically "no pause between two reads". So every
+// read is broken into SEGMENT_SIZE-byte requests with a short pause between
+// them, giving the bridge recovery gaps throughout instead of just once.
+const SEGMENT_SIZE = 262144;   // 256KB per request -- must be a multiple of CHUNK_SIZE (1024) in main.c
+const SEGMENT_PAUSE_MS = 150;  // breathing room between segments
+
+async function readSegmented(rx, addrBytes, total, onProgress) {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  while (offset < total) {
+    const segSize = Math.min(SEGMENT_SIZE, total - offset);
+    const writer = port.writable.getWriter();
+    // 'R' + addr_bytes(1) + start_addr(4 LE) + size(4 LE), matching main.c's main() command parser
+    await writer.write(concatBytes(new Uint8Array([0x52, addrBytes]), u32le(offset), u32le(segSize)));
+    writer.releaseLock();
+    await rx.expectLinkAck();
+    const segOffset = offset;
+    const seg = await rx.readExact(segSize, (done) => onProgress(segOffset + done, total));
+    out.set(seg, offset);
+    offset += segSize;
+    if (offset < total) {
+      await new Promise((resolve) => setTimeout(resolve, SEGMENT_PAUSE_MS));
+    }
+  }
+  return out;
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Plain synchronous single-shot read, no segmentation/pauses -- segmenting
+// with pauses didn't fix the mid-transfer stalls (same jerky pattern
+// persisted), so this is back to how it worked before that experiment.
+// readSegmented() above is kept around unused in case it's useful later
+// (e.g. if the real cause turns out to need it).
+async function readOnce(rx, addrBytes, startAddr, total, onProgress) {
+  const writer = port.writable.getWriter();
+  await writer.write(concatBytes(new Uint8Array([0x52, addrBytes]), u32le(startAddr), u32le(total)));
+  writer.releaseLock();
+  await rx.expectLinkAck();
+  return await rx.readExact(total, onProgress);
+}
+
+btnRead.addEventListener('click', async () => {
+  if (!port) return;
+  const total = parseInt(sizeInput.value, 10) || 16384;
+  const addrBytes = parseInt(addrBytesInput.value, 10) || 2;
+  const startAddr = parseInt(startAddrInput.value, 10) || 0;
+  setPortBusy(true);
+  btnSave.disabled = true;
+  btnShowFullDump.disabled = true; // no reads (nor a full-dump render) while a new dump is coming in
+  compareFileInput.disabled = true;
+  btnClearCompare.disabled = true;
+  readVerifyRow.style.display = 'none';
+  compareResultRow.style.display = 'none';
+  diffLegendRow.style.display = 'none';
+  setProgress(0, total);
+  setStatus('Reading…');
+  // Tear down any stale huge hex view (e.g. from a previous "Show Full Dump")
+  // right away, BEFORE the transfer starts -- merely having ~262,000 lines
+  // sitting in the DOM keeps costing the browser on every subsequent layout/
+  // paint, which was making a brand new read look jerky/stalled even though
+  // the old text itself was already fully rendered and not being touched.
+  hexview.textContent = 'Reading…';
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    const bytes = await readOnce(rx, addrBytes, startAddr, total, setProgress);
+    dumpBytes = bytes;
+    hexViewSource = bytes;
+    setStatus(`Read ${bytes.length} bytes.`, 'ok');
+    btnSave.disabled = false;
+    // Yield so "Read N bytes" actually paints before any rendering work below --
+    // without this, heavy synchronous work right after completion can make the
+    // last state the user sees painted be a stale mid-transfer percentage.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    hexview.textContent = toHexDump(bytes, HEXDUMP_PREVIEW_BYTES); // cheap preview only; full dump is opt-in below
+    btnShowFullDump.disabled = false;
+    compareFileInput.disabled = false;
+    bitmapWorkingBytes = null; // fresh dump -- drop any stale edits, next renderBitmap() reinitializes from it
+    bmEndClickSession();
+    renderBitmap();
+  } catch (err) {
+    setStatus('Read failed: ' + err.message, 'err');
+  } finally {
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+    if (hexViewSource) { btnShowFullDump.disabled = false; compareFileInput.disabled = false; }
+  }
+});
+
+// Renders the ENTIRE dump as hex -- expensive (see toHexDump's comment above),
+// so it's opt-in only, and reads are blocked while it's running just like
+// while a real read is in flight.
+btnShowFullDump.addEventListener('click', async () => {
+  if (!hexViewSource) return;
+  btnRead.disabled = true;
+  btnReadCompare.disabled = true;
+  btnShowFullDump.disabled = true;
+  compareFileInput.disabled = true;
+  btnClearCompare.disabled = true;
+  compareResultRow.style.display = 'none';
+  diffLegendRow.style.display = 'none';
+  setStatus('Rendering full hex dump (this can take a few seconds on a big chip)…');
+  await new Promise((resolve) => requestAnimationFrame(resolve)); // let the status above actually paint first
+  hexview.textContent = toHexDump(hexViewSource);
+  setStatus('Full dump rendered.', 'ok');
+  btnRead.disabled = false;
+  btnReadCompare.disabled = false;
+  btnShowFullDump.disabled = false;
+  compareFileInput.disabled = false;
+});
+
+// Manual, explicit second read + checksum compare against the dump already
+// held from Read Dump -- opt-in instead of automatic, so a normal Read Dump
+// isn't always doubled in time.
+// Compares a FRESH chip read against hexViewSource -- whatever is currently
+// being looked at, which might be the last real dump (the original "verify
+// read stability" use case) or a file loaded for writing (lets you check
+// "does the chip already match this candidate file" before/after a Write).
+// It used to always compare against dumpBytes specifically, ignoring
+// whatever the viewer was actually showing -- e.g. load a write file, hit
+// this button, and it would silently report "matches" by comparing the chip
+// against the *previous* real read instead of against the loaded file.
+btnReadCompare.addEventListener('click', async () => {
+  if (!port || !hexViewSource) return;
+  const total = parseInt(sizeInput.value, 10) || 16384;
+  const addrBytes = parseInt(addrBytesInput.value, 10) || 2;
+  const startAddr = parseInt(startAddrInput.value, 10) || 0;
+  setPortBusy(true);
+  btnShowFullDump.disabled = true;
+  compareFileInput.disabled = true;
+  readVerifyRow.style.display = 'none';
+  setProgress(0, total);
+  setStatus('Reading again to compare…');
+  // Same reason as in btnRead: a leftover huge full-dump/diff view in the DOM
+  // keeps costing the browser during this transfer even though its own text
+  // isn't changing, so drop back to the cheap preview before starting.
+  hexview.textContent = toHexDump(hexViewSource, HEXDUMP_PREVIEW_BYTES);
+  diffLegendRow.style.display = 'none';
+  compareResultRow.style.display = 'none';
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    const bytes2 = await readOnce(rx, addrBytes, startAddr, total, setProgress);
+    const [hash1, hash2] = await Promise.all([sha256Hex(hexViewSource), sha256Hex(bytes2)]);
+    readVerifyRow.style.display = '';
+    if (hash1 === hash2) {
+      readVerifyResult.innerHTML = `<span class="ok">Verified: the chip matches what's currently shown (SHA-256 ${hash1.slice(0, 16)}…).</span>`;
+      setStatus('Compare OK — matches what\'s shown.', 'ok');
+    } else {
+      let firstDiff = -1;
+      for (let i = 0; i < total; i++) {
+        if (hexViewSource[i] !== bytes2[i]) { firstDiff = i; break; }
+      }
+      readVerifyResult.innerHTML = `<span class="err">Mismatch against what's currently shown -- could be a read glitch on this pass, ` +
+        `or the chip genuinely doesn't contain this data (e.g. comparing against a write file you haven't flashed yet). ` +
+        `First differing offset 0x${firstDiff.toString(16).padStart(4, '0')} ` +
+        `(shown: 0x${hexViewSource[firstDiff].toString(16).padStart(2, '0')}, new read: 0x${bytes2[firstDiff].toString(16).padStart(2, '0')}).</span>`;
+      setStatus('Compare found a mismatch — see note below.', 'err');
+    }
+  } catch (err) {
+    setStatus('Compare failed: ' + err.message, 'err');
+  } finally {
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+    btnShowFullDump.disabled = false;
+    compareFileInput.disabled = false;
+  }
+});
+
+btnErase.addEventListener('click', async () => {
+  if (!port) return;
+  const addrBytes = parseInt(addrBytesInput.value, 10) || 3;
+  if (!confirm('This will erase the ENTIRE chip to 0xFF. Make sure you already saved a backup dump. Proceed?')) {
+    return;
+  }
+
+  setPortBusy(true);
+  setStatus('Erasing (can take tens of ms, chip-dependent)…');
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    await writer.write(new Uint8Array([0x45, addrBytes])); // 'E' + addr_bytes
+    writer.releaseLock();
+    await rx.expectLinkAck();
+    setStatus('Erasing…'); // link confirmed, now waiting for the actual erase cycle to finish
+    await readAckOrThrow(rx, 'Erase', WRITE_ACK_TIMEOUT_MS);
+    setStatus('Erase complete.', 'ok');
+  } catch (err) {
+    setStatus('Erase failed: ' + err.message, 'err');
+  } finally {
+    try { writer.releaseLock(); } catch (e) { /* already released */ }
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+  }
+});
+
+btnIdentify.addEventListener('click', async () => {
+  if (!port) return;
+  setPortBusy(true);
+  identifyResultRow.style.display = 'none';
+  setStatus('Identifying…');
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    await writer.write(new Uint8Array([0x49])); // 'I'
+    writer.releaseLock();
+    await rx.expectLinkAck();
+    const id = await rx.readExact(3, () => {});
+    const [mfg, type, cap] = id;
+    const hex = (b) => '0x' + b.toString(16).padStart(2, '0');
+    const mfgName = JEDEC_MANUFACTURERS[mfg] || 'unknown manufacturer';
+
+    const guessedSize = guessCapacityFromByte(cap);
+    const sizeHint = guessedSize
+      ? ` Capacity byte decodes (common 2^N convention) to ${guessedSize.toLocaleString()} bytes (${guessedSize / 1024}KB) -- not guaranteed for every vendor, but a strong hint.`
+      : '';
+
+    let verdict = '';
+    const profile = CHIP_PROFILES[chipProfileSelect.value];
+    if (profile && profile.jedec) {
+      const match = profile.jedec.every((b, i) => b === id[i]);
+      verdict = match
+        ? ` — matches the selected profile exactly.`
+        : ` — does NOT match the selected profile (expected ${profile.jedec.map(hex).join(' ')}).${sizeHint} Search "${hex(mfg)} ${hex(type)} ${hex(cap)} jedec id" to confirm the exact part.`;
+    } else {
+      verdict = ` — no reference JEDEC ID for the selected profile to compare against.${sizeHint} Search "${hex(mfg)} ${hex(type)} ${hex(cap)} jedec id" to identify the real part.`;
+    }
+    if (mfg === 0xff || mfg === 0x00) {
+      verdict = ' — looks like this chip does not implement JEDEC Read-ID at all (plain EEPROMs like the M95128 usually don\'t); this is expected for those, not an error.';
+    }
+
+    identifyResultRow.style.display = '';
+    identifyResult.textContent =
+      `Manufacturer: ${hex(mfg)} (${mfgName})  Memory Type: ${hex(type)}  Capacity: ${hex(cap)}${verdict}`;
+    setStatus('Identify complete.', 'ok');
+  } catch (err) {
+    setStatus('Identify failed: ' + err.message, 'err');
+  } finally {
+    try { writer.releaseLock(); } catch (e) { /* already released */ }
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+  }
+});
+
+// RDSR (0x05) -- the bit layout below (BUSY/WEL/BP0-3/.../BPL) is the common
+// 25-series convention; bit 6 varies by vendor (AAI status on some NOR flash,
+// reserved on others) so it's shown raw rather than guessed at.
+btnReadStatus.addEventListener('click', async () => {
+  if (!port) return;
+  setPortBusy(true);
+  statusResultRow.style.display = 'none';
+  setStatus('Reading status register…');
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    await writer.write(new Uint8Array([0x53])); // 'S'
+    writer.releaseLock();
+    await rx.expectLinkAck();
+    const [sr] = await rx.readExact(1, () => {});
+    const bit = (n) => (sr >> n) & 1;
+    const bpBits = [bit(5), bit(4), bit(3), bit(2)].join(''); // BP3 BP2 BP1 BP0
+    const protected_ = bit(2) || bit(3) || bit(4) || bit(5);
+
+    statusResultRow.style.display = '';
+    statusResult.innerHTML =
+      `Status register: 0x${sr.toString(16).padStart(2, '0')} — ` +
+      `BUSY=${bit(0)} WEL=${bit(1)} BP3-0=${bpBits} BPL=${bit(7)}` +
+      (protected_
+        ? ` — <span class="err">block protection bits are set, writes to protected regions will be silently ignored — use Clear Protection</span>`
+        : ` — <span class="ok">no block protection bits set, writes should go through</span>`);
+    setStatus('Status read.', 'ok');
+  } catch (err) {
+    setStatus('Read Status failed: ' + err.message, 'err');
+  } finally {
+    try { writer.releaseLock(); } catch (e) { /* already released */ }
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+  }
+});
+
+btnClearProtection.addEventListener('click', async () => {
+  if (!port) return;
+  if (!confirm('This clears the status register\'s block-protection bits (WRSR, 0x00) so the whole array becomes writable. Proceed?')) {
+    return;
+  }
+  setPortBusy(true);
+  statusResultRow.style.display = 'none';
+  setStatus('Clearing write protection…');
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    await writer.write(new Uint8Array([0x55])); // 'U'
+    writer.releaseLock();
+    await rx.expectLinkAck();
+    await readAckOrThrow(rx, 'Clear Protection', WRITE_ACK_TIMEOUT_MS);
+    statusResultRow.style.display = '';
+    statusResult.innerHTML = `<span class="ok">Protection cleared. Click Read Status to confirm.</span>`;
+    setStatus('Protection cleared.', 'ok');
+  } catch (err) {
+    setStatus('Clear Protection failed: ' + err.message, 'err');
+  } finally {
+    try { writer.releaseLock(); } catch (e) { /* already released */ }
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+  }
+});
+
+btnProtectAll.addEventListener('click', async () => {
+  if (!port) return;
+  if (!confirm('This sets the status register\'s block-protection bits (WRSR, 0x0C) so the WHOLE ARRAY REJECTS WRITES -- including from the device this chip normally lives in. Use Clear Protection from this tool to undo it later. Proceed?')) {
+    return;
+  }
+  setPortBusy(true);
+  statusResultRow.style.display = 'none';
+  setStatus('Setting write protection…');
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    await writer.write(new Uint8Array([0x50])); // 'P'
+    writer.releaseLock();
+    await rx.expectLinkAck();
+    await readAckOrThrow(rx, 'Protect All', WRITE_ACK_TIMEOUT_MS);
+    statusResultRow.style.display = '';
+    statusResult.innerHTML = `<span class="ok">Whole array protected. Click Read Status to confirm.</span>`;
+    setStatus('Protection set.', 'ok');
+  } catch (err) {
+    setStatus('Protect All failed: ' + err.message, 'err');
+  } finally {
+    try { writer.releaseLock(); } catch (e) { /* already released */ }
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+  }
+});
+
+btnSave.addEventListener('click', () => {
+  if (!dumpBytes) return;
+  const blob = new Blob([dumpBytes], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'dump.bin';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+btnWrite.addEventListener('click', async () => {
+  if (!port || !writeFileBytes) return;
+  const total = writeFileBytes.length;
+  const addrBytes = parseInt(addrBytesInput.value, 10) || 2;
+  const pageSize = parseInt(pageSizeInput.value, 10) || 64;
+  const batchSize = parseInt(batchSizeInput.value, 10) || pageSize;
+
+  // page_size travels as a single byte on the wire (main.c's 'W' command) --
+  // 256 wraps to 0 and used to divide-by-zero-hang the MCU. batch_size not
+  // dividing evenly by page_size, or total size not dividing evenly by
+  // batch_size, both mean the last chunk sent is short of what the firmware
+  // was told to expect in the 'W' header -- and usart1_recv_byte() on the
+  // device has *no* timeout at all, so it hangs forever waiting for bytes
+  // that will never arrive, requiring a physical power-cycle to recover.
+  // All three are caught here up front instead of silently sending a
+  // malformed transfer.
+  if (pageSize < 1 || pageSize > 255) {
+    setStatus(`Write failed: Page size (${pageSize}) must be between 1 and 255 (single byte on the wire).`, 'err');
+    return;
+  }
+  if (batchSize % pageSize !== 0) {
+    setStatus(`Write failed: Batch size (${batchSize}) must be an exact multiple of Page size (${pageSize}).`, 'err');
+    return;
+  }
+  if (total % batchSize !== 0) {
+    setStatus(`Write failed: file size (${total}) must be an exact multiple of Batch size (${batchSize}) -- the firmware has no timeout waiting for batch data, a short last batch hangs it solid. Adjust Batch size to divide evenly.`, 'err');
+    return;
+  }
+
+  const profile = CHIP_PROFILES[chipProfileSelect.value];
+  const eraseNote = (profile && profile.needsErase)
+    ? ' This chip is NOR flash: bytes can only go from 1->0 without an erase; if you have not run Erase Chip first, this Write will effectively AND with whatever is already there instead of overwriting it.'
+    : '';
+  if (!confirm(
+    `This will overwrite all ${total} bytes on the chip. Make sure you already saved a ` +
+    `backup dump of the current contents before continuing.${eraseNote} Proceed?`
+  )) {
+    return;
+  }
+
+  setPortBusy(true);
+  btnSave.disabled = true;
+  writeResultRow.style.display = 'none';
+  setProgress(0, total);
+  setStatus('Writing…');
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const rx = makeByteReader(reader);
+  try {
+    // 'W' + addr_bytes(1) + page_size(1) + batch_size(2 LE) + size(4 LE), matching main.c's main() command parser
+    await writer.write(concatBytes(new Uint8Array([0x57, addrBytes, pageSize]), u16le(batchSize), u32le(total)));
+    await rx.expectLinkAck();
+
+    const numBatches = total / batchSize;
+    for (let b = 0; b < numBatches; b++) {
+      const batch = writeFileBytes.subarray(b * batchSize, (b + 1) * batchSize);
+      await sendBatchWithChecksum(writer, rx, batch, `Write (batch ${b})`, WRITE_ACK_TIMEOUT_MS);
+      setProgress((b + 1) * batchSize, total);
+    }
+
+    setStatus('Write complete, reading back to verify…');
+    setProgress(0, total);
+    const verifyBytes = await rx.readExact(total, setProgress);
+
+    dumpBytes = verifyBytes;
+    hexViewSource = verifyBytes;
+    hexview.textContent = toHexDump(verifyBytes, HEXDUMP_PREVIEW_BYTES);
+    btnShowFullDump.disabled = false;
+    compareFileInput.disabled = false;
+    btnSave.disabled = false;
+
+    let mismatches = 0;
+    let firstOffset = -1;
+    for (let i = 0; i < total; i++) {
+      if (verifyBytes[i] !== writeFileBytes[i]) {
+        if (firstOffset < 0) firstOffset = i;
+        mismatches++;
+      }
+    }
+
+    writeResultRow.style.display = '';
+    if (mismatches === 0) {
+      writeResult.innerHTML = `<span class="ok">Write verified OK — all ${total} bytes match.</span>`;
+      setStatus('Write verified OK.', 'ok');
+    } else {
+      writeResult.innerHTML = `<span class="err">Verify FAILED — ${mismatches} byte(s) differ, ` +
+        `first at offset 0x${firstOffset.toString(16).padStart(4, '0')} ` +
+        `(wrote 0x${writeFileBytes[firstOffset].toString(16).padStart(2, '0')}, ` +
+        `read 0x${verifyBytes[firstOffset].toString(16).padStart(2, '0')}). ` +
+        `The hex view above shows what is actually on the chip now.</span>`;
+      setStatus('Write verification failed.', 'err');
+    }
+  } catch (err) {
+    setStatus('Write failed: ' + err.message, 'err');
+  } finally {
+    try { writer.releaseLock(); } catch (e) { /* already released */ }
+    try { reader.releaseLock(); } catch (e) { /* already released */ }
+    setPortBusy(false);
+  }
+});
+</script>

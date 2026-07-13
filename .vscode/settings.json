@@ -1,0 +1,7 @@
+{
+    "cmake.configureOnOpen": false,
+    "files.exclude": {
+        "**/build": true,
+        "**/.downloaded_*": true
+    }
+}

@@ -1,0 +1,6 @@
+/build/
+/cmake/tool_paths.cmake
+/device/.downloaded_*
+/.vscode/launch.json
+*.o
+*.d
