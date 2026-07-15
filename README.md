@@ -32,7 +32,6 @@ SPI EEPROM and NOR flash chips over a simple UART link.
 ## Building
 
 ```powershell
-./setup.ps1   # first time only
 ./build.ps1
 ```
 
