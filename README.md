@@ -25,7 +25,7 @@ SPI EEPROM and NOR flash chips over a simple UART link.
   at the top of the file.
 - `web/index.html` — the browser UI (Chrome/Edge/Opera, Web Serial API).
 - `device/` — CMSIS device headers/startup for the STM32F1 family.
-- `cmake/`, `CMakeLists.txt`, `build.ps1`, `setup.ps1` — build system.
+- `cmake/`, `CMakeLists.txt`, `build.ps1` — build system.
 - `scripts/` — standalone PowerShell helpers (flashing, size reports, raw
   dump/write without the web UI).
 
