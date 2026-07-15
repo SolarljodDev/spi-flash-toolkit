@@ -4,3 +4,6 @@
 /.vscode/launch.json
 *.o
 *.d
+test_*.ps1
+*_*.md
+.claude/
